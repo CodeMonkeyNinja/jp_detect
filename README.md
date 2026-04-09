@@ -31,6 +31,38 @@ for b in detector.detect(&image) {
 Pass a file path as the first argument to use a custom model instead of the
 bundled one.
 
+## Examples
+
+### `detect_and_draw`
+
+Converts each input image to greyscale, detects text regions, draws red
+bounding boxes over them, and writes the annotated PNG and a JSON file with
+box coordinates to `/dev/shm/jp_detect/`.
+
+```sh
+# Run on the built-in test fixtures
+cargo run --example detect_and_draw --features onnx
+
+# Run on your own images
+cargo run --example detect_and_draw --features onnx -- /path/to/a.png /path/to/b.png
+```
+
+Output per image (e.g. for `screenshot.png`):
+
+```
+image : /dev/shm/jp_detect/screenshot_annotated.png
+json  : /dev/shm/jp_detect/screenshot_boxes.json (3 boxes)
+```
+
+JSON format:
+
+```json
+[
+  {"index": 0, "x1": 122, "y1": 42, "x2": 670, "y2": 1494, "width": 548, "height": 1452},
+  {"index": 1, "x1": 734, "y1": 213, "x2": 2668, "y2": 440, "width": 1934, "height": 227}
+]
+```
+
 ## Pipeline
 
 ```

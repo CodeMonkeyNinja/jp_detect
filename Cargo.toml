@@ -10,7 +10,7 @@ repository  = "https://github.com/codemonkeyninja/jp_detect"
 homepage    = "https://github.com/codemonkeyninja/jp_detect"
 readme      = "README.md"
 # Large test fixtures are excluded from crates.io packages.
-exclude     = ["tests/fixtures/*.png"]
+exclude     = ["tests/fixtures/*.png", "mirror/"]
 
 # The bundled ONNX model is ~4.7 MB and is compiled into the binary when the
 # `onnx` feature is enabled.  Pass a model path to `build_text_detector` to

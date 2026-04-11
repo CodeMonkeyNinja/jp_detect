@@ -1,6 +1,6 @@
 [package]
 name        = "jp_detect"
-version     = "0.2.1"
+version     = "0.2.2"
 edition     = "2021"
 description = "Real-time scene text detection using DBNet and an embedded ONNX model."
 license     = "MIT"
@@ -10,7 +10,7 @@ repository  = "https://github.com/codemonkeyninja/jp_detect"
 homepage    = "https://github.com/codemonkeyninja/jp_detect"
 readme      = "README.md"
 # Large test fixtures are excluded from crates.io packages.
-exclude     = ["tests/fixtures/*.png", "mirror/"]
+exclude     = ["tests/fixtures/*.png", "mirror/", "examples/output/"]
 
 # The bundled ONNX model is ~4.7 MB and is compiled into the binary when the
 # `onnx` feature is enabled.  Pass a model path to `build_text_detector` to

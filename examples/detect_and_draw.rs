@@ -8,10 +8,10 @@
 
 use std::path::Path;
 
-use image::Rgba;
+use image::{GenericImageView, Rgba};
 use imageproc::drawing::draw_hollow_rect_mut;
 use imageproc::rect::Rect;
-use jp_detect::build_text_detector;
+use jp_detect::{build_text_detector, detection_params_for_size};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -29,11 +29,13 @@ fn main() -> anyhow::Result<()> {
     let out_dir = Path::new("/dev/shm/jp_detect");
     std::fs::create_dir_all(out_dir)?;
 
-    let detector = build_text_detector(None, 0.2, 16, 32, 32)?
-        .expect("build_text_detector returned None — was the `onnx` feature enabled?");
-
     for path in &paths {
         let src = image::open(path)?;
+
+        let (w, h) = src.dimensions();
+        let p = detection_params_for_size(w, h);
+        let detector = build_text_detector(None, p.threshold, p.dilation, p.pad_x, p.pad_y)?
+            .expect("build_text_detector returned None — was the `onnx` feature enabled?");
 
         let boxes = detector.detect(&src);
 
@@ -81,16 +83,23 @@ fn boxes_to_json(boxes: &[jp_detect::TextBoundingBox]) -> String {
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            format!(
-                "  {{\"index\": {i}, \"x1\": {}, \"y1\": {}, \"x2\": {}, \"y2\": {}, \
-                 \"width\": {}, \"height\": {}}}",
-                b.x1,
-                b.y1,
-                b.x2,
-                b.y2,
-                b.width(),
-                b.height()
-            )
+            {
+                let pts: usize = b.contours.iter().map(|c| c.len()).sum();
+                format!(
+                    "  {{\"index\": {i}, \"x1\": {}, \"y1\": {}, \"x2\": {}, \"y2\": {}, \
+                     \"width\": {}, \"height\": {}, \"confidence\": {:.4}, \
+                     \"contours\": {}, \"contour_points\": {}}}",
+                    b.x1,
+                    b.y1,
+                    b.x2,
+                    b.y2,
+                    b.width(),
+                    b.height(),
+                    b.confidence,
+                    b.contours.len(),
+                    pts
+                )
+            }
         })
         .collect();
     format!("[\n{}\n]\n", entries.join(",\n"))

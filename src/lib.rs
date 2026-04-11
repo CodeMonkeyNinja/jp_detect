@@ -19,14 +19,18 @@
 //! ```no_run
 //! # #[cfg(feature = "onnx")]
 //! # {
-//! use jp_detect::build_text_detector;
+//! use image::GenericImageView;
+//! use jp_detect::{build_text_detector, detection_params_for_size};
 //!
-//! // `None` → use the bundled model (requires the `onnx` feature).
-//! let detector = build_text_detector(None, 0.2, 16, 32, 32).unwrap().unwrap();
 //! let image = image::open("screenshot.png").unwrap();
+//! let (w, h) = image.dimensions();
+//! let p = detection_params_for_size(w, h);
+//! let detector = build_text_detector(None, p.threshold, p.dilation, p.pad_x, p.pad_y)
+//!     .unwrap().unwrap();
 //! let boxes = detector.detect(&image);
 //! for b in &boxes {
-//!     println!("text region: ({},{})–({},{})", b.x1, b.y1, b.x2, b.y2);
+//!     println!("[{:.0}%] ({},{})–({},{})", b.confidence * 100.0,
+//!              b.x1, b.y1, b.x2, b.y2);
 //! }
 //! # }
 //! ```
@@ -49,12 +53,26 @@ use image::GenericImageView;
 // ── Public types (always compiled, no feature gate) ───────────────────────────
 
 /// Axis-aligned bounding box in the coordinate space of the source image.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextBoundingBox {
     pub x1: u32,
     pub y1: u32,
     pub x2: u32,
     pub y2: u32,
+    /// Mean probability of thresholded pixels in this region (0.0–1.0).
+    ///
+    /// Computed from the DBNet probability map.  Higher values indicate
+    /// stronger model confidence that the region contains text.
+    pub confidence: f32,
+    /// Contour polygon(s) in original-image coordinates.
+    ///
+    /// Each inner `Vec` is a closed polygon whose last point connects back to
+    /// the first.  A single unmerged detection has one polygon; merged
+    /// detections carry the constituent polygons.  Points are `[x, y]` pairs.
+    ///
+    /// Use these for oriented bounding boxes, text-angle estimation, or tighter
+    /// masking than the axis-aligned bbox provides.
+    pub contours: Vec<Vec<[u32; 2]>>,
 }
 
 impl TextBoundingBox {
@@ -70,6 +88,28 @@ impl TextBoundingBox {
     pub fn intersects(&self, other: &Self) -> bool {
         self.x1 < other.x2 && self.x2 > other.x1 && self.y1 < other.y2 && self.y2 > other.y1
     }
+}
+
+/// Full detection result including the raw probability map.
+///
+/// Returned by [`DbNetDetector::detect_with_map`].  The `boxes` field is the
+/// same data returned by the [`TextDetector::detect`] trait method; the extra
+/// fields expose the underlying DBNet probability map for custom post-processing
+/// or visualisation.
+#[derive(Debug, Clone)]
+pub struct DetectionOutput {
+    /// Detected text regions (same as [`TextDetector::detect`] returns).
+    pub boxes: Vec<TextBoundingBox>,
+    /// Raw DBNet probability map, row-major.
+    ///
+    /// Each value is the model's per-pixel confidence (0.0–1.0) that the pixel
+    /// contains text.  Dimensions are `map_width × map_height` (640 × 640 for
+    /// the bundled model).
+    pub probability_map: Vec<f32>,
+    /// Width of the probability map in pixels.
+    pub map_width: u32,
+    /// Height of the probability map in pixels.
+    pub map_height: u32,
 }
 
 /// Swappable text-detection backend.
@@ -91,7 +131,8 @@ pub fn compute_union_bbox(boxes: &[TextBoundingBox]) -> Option<TextBoundingBox> 
     let y1 = boxes.iter().map(|b| b.y1).min().unwrap();
     let x2 = boxes.iter().map(|b| b.x2).max().unwrap();
     let y2 = boxes.iter().map(|b| b.y2).max().unwrap();
-    Some(TextBoundingBox { x1, y1, x2, y2 })
+    let confidence = boxes.iter().map(|b| b.confidence).fold(0.0f32, f32::max);
+    Some(TextBoundingBox { x1, y1, x2, y2, confidence, contours: vec![] })
 }
 
 /// Return the index of the box whose nearest edge is closest to `(px, py)`.
@@ -116,6 +157,59 @@ pub fn closest_box_to_point(boxes: &[TextBoundingBox], px: u32, py: u32) -> usiz
         })
         .unwrap()
         .0
+}
+
+// ── Detection scale table ────────────────────────────────────────────────────
+
+/// A row in the detection scale table.
+///
+/// DBNet always runs at 640 × 640 internally, so a dilation of *N* pixels at
+/// that resolution represents *N* × (original / 640) pixels in the original
+/// image — much more morphological blur for large inputs.  The default scale
+/// table compensates by reducing dilation and raising the confidence threshold
+/// as image size grows.
+#[derive(Debug, Clone)]
+pub struct DetectionScaleEntry {
+    /// Images whose longest edge is ≤ this value use these params.
+    pub max_dimension: u32,
+    /// Morphological dilation radius (pixels at 640 × 640 DBNet resolution).
+    pub dilation: u8,
+    /// DBNet confidence threshold.  Higher → fewer but more certain detections.
+    pub threshold: f32,
+    /// Horizontal padding added to each bbox in original-image pixels.
+    pub pad_x: u32,
+    /// Vertical padding added to each bbox in original-image pixels.
+    pub pad_y: u32,
+}
+
+/// Default scale table.  Entries are sorted ascending by `max_dimension`; the
+/// last entry (`u32::MAX`) is the catch-all.
+///
+/// | Longest edge | Dilation | Threshold | Pad |
+/// |--------------|----------|-----------|-----|
+/// | ≤ 800        | 16       | 0.20      | 32  |
+/// | ≤ 1 280      | 10       | 0.25      | 24  |
+/// | ≤ 1 920      |  6       | 0.35      | 16  |
+/// | ≤ 2 560      |  3       | 0.45      | 12  |
+/// | > 2 560      |  0       | 0.50      |  8  |
+pub const DEFAULT_SCALE_TABLE: &[DetectionScaleEntry] = &[
+    DetectionScaleEntry { max_dimension:       800, dilation: 16, threshold: 0.20, pad_x: 32, pad_y: 32 },
+    DetectionScaleEntry { max_dimension:      1280, dilation: 10, threshold: 0.25, pad_x: 24, pad_y: 24 },
+    DetectionScaleEntry { max_dimension:      1920, dilation:  6, threshold: 0.35, pad_x: 16, pad_y: 16 },
+    DetectionScaleEntry { max_dimension:      2560, dilation:  3, threshold: 0.45, pad_x: 12, pad_y: 12 },
+    DetectionScaleEntry { max_dimension: u32::MAX,  dilation:  0, threshold: 0.50, pad_x:  8, pad_y:  8 },
+];
+
+/// Look up detection parameters for an image of the given pixel dimensions.
+///
+/// Returns the first entry in [`DEFAULT_SCALE_TABLE`] whose `max_dimension` is
+/// ≥ the image's longest edge.
+pub fn detection_params_for_size(w: u32, h: u32) -> &'static DetectionScaleEntry {
+    let longest = w.max(h);
+    DEFAULT_SCALE_TABLE
+        .iter()
+        .find(|e| longest <= e.max_dimension)
+        .unwrap_or(DEFAULT_SCALE_TABLE.last().unwrap())
 }
 
 // ── Bundled model (onnx feature only) ─────────────────────────────────────────
@@ -244,11 +338,13 @@ impl DbNetDetector {
             pad_y,
         })
     }
-}
 
-#[cfg(feature = "onnx")]
-impl TextDetector for DbNetDetector {
-    fn detect(&self, image: &DynamicImage) -> Vec<TextBoundingBox> {
+    /// Run detection and return the full [`DetectionOutput`] including the raw
+    /// probability map.
+    ///
+    /// This is the richer alternative to the [`TextDetector::detect`] trait
+    /// method, which only returns bounding boxes.
+    pub fn detect_with_map(&self, image: &DynamicImage) -> DetectionOutput {
         let (orig_w, orig_h) = image.dimensions();
         let flat = preprocess(image);
 
@@ -257,7 +353,12 @@ impl TextDetector for DbNetDetector {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("[jp_detect] failed to create input tensor: {e}");
-                return vec![];
+                return DetectionOutput {
+                    boxes: vec![],
+                    probability_map: vec![],
+                    map_width: INPUT_SIZE,
+                    map_height: INPUT_SIZE,
+                };
             }
         };
 
@@ -267,7 +368,12 @@ impl TextDetector for DbNetDetector {
                 Ok(o) => o,
                 Err(e) => {
                     eprintln!("[jp_detect] inference failed: {e}");
-                    return vec![];
+                    return DetectionOutput {
+                        boxes: vec![],
+                        probability_map: vec![],
+                        map_width: INPUT_SIZE,
+                        map_height: INPUT_SIZE,
+                    };
                 }
             };
 
@@ -275,11 +381,16 @@ impl TextDetector for DbNetDetector {
             Ok((_, slice)) => slice.to_vec(),
             Err(e) => {
                 eprintln!("[jp_detect] failed to extract output tensor: {e}");
-                return vec![];
+                return DetectionOutput {
+                    boxes: vec![],
+                    probability_map: vec![],
+                    map_width: INPUT_SIZE,
+                    map_height: INPUT_SIZE,
+                };
             }
         };
 
-        postprocess(
+        let boxes = postprocess(
             &prob_vec,
             orig_w,
             orig_h,
@@ -287,7 +398,21 @@ impl TextDetector for DbNetDetector {
             self.dilation,
             self.pad_x,
             self.pad_y,
-        )
+        );
+
+        DetectionOutput {
+            boxes,
+            probability_map: prob_vec,
+            map_width: INPUT_SIZE,
+            map_height: INPUT_SIZE,
+        }
+    }
+}
+
+#[cfg(feature = "onnx")]
+impl TextDetector for DbNetDetector {
+    fn detect(&self, image: &DynamicImage) -> Vec<TextBoundingBox> {
+        self.detect_with_map(image).boxes
     }
 }
 
@@ -384,6 +509,12 @@ fn postprocess(
     }
 
     // Dilation: merge nearby blobs, compensate for DBNet's shrunk training targets
+    //
+    // NOTE (unsupported data — pre-dilation contours): Running find_contours on
+    // `gray` *before* dilation yields individual character or character-cluster
+    // blobs.  The count could serve as a rough character estimate, and the
+    // individual shapes could help line-segmentation or reading-order analysis.
+    // Not exposed yet — compute `find_contours(&gray)` here if needed.
     let mask = if dilation > 0 {
         dilate(&gray, Norm::L1, dilation)
     } else {
@@ -393,6 +524,25 @@ fn postprocess(
     let contours = find_contours::<u32>(&mask);
     let scale_x = orig_w as f32 / INPUT_SIZE as f32;
     let scale_y = orig_h as f32 / INPUT_SIZE as f32;
+
+    // NOTE (unsupported data — contour hierarchy): Each `Contour` from
+    // imageproc also carries:
+    //
+    //   • border_type (Outer | Hole) — whether the contour bounds a
+    //     foreground region or a hole inside one.  We currently process all
+    //     contours regardless of type.  Filtering to `Outer` only would
+    //     eliminate rare false-positive detections from interior boundaries
+    //     (e.g. the inside of large characters after dilation).
+    //
+    //   • parent (Option<usize>) — index of this contour's parent in the
+    //     hierarchy tree returned by find_contours.  Could reveal nested
+    //     text regions (text inside a bordered panel) or help distinguish
+    //     foreground text from background patterns.
+    //
+    // NOTE (unsupported data — discarded contours): Contours with < 4 points
+    // or whose AABB is smaller than 5×5 at 640×640 scale are silently
+    // dropped.  The count of discarded contours could serve as a diagnostic
+    // signal (high count may indicate noisy input or an aggressive threshold).
 
     let mut boxes = Vec::new();
     for contour in &contours {
@@ -408,6 +558,48 @@ fn postprocess(
             continue;
         }
 
+        // Mean probability of thresholded pixels inside this contour bbox.
+        let mut prob_sum = 0.0f32;
+        let mut prob_count = 0u32;
+        for py in min_y..=max_y {
+            for px in min_x..=max_x {
+                let p = prob_map[py as usize * INPUT_SIZE as usize + px as usize];
+                if p >= threshold {
+                    prob_sum += p;
+                    prob_count += 1;
+                }
+            }
+        }
+        let confidence = if prob_count > 0 { prob_sum / prob_count as f32 } else { 0.0 };
+
+        // NOTE (unsupported data — per-contour extras): The following are
+        // cheaply available here but not yet exposed:
+        //
+        //   • max probability — `prob_map` max within the bbox.  Useful for
+        //     ranking detections by "hottest" pixel rather than mean.
+        //
+        //   • fill ratio — `prob_count` (thresholded pixels) divided by
+        //     `(max_x - min_x + 1) * (max_y - min_y + 1)` (bbox area at
+        //     640×640 scale).  High ratio → dense text block; low → sparse
+        //     label.  Helps distinguish paragraphs from isolated words.
+        //
+        //   • thresholded pixel count — `prob_count` itself, proportional to
+        //     text-ink area at model resolution.  Combined with bbox area it
+        //     gives fill ratio, and alone it is a rough proxy for amount of
+        //     text in the region.
+
+        // Contour polygon scaled to original-image coordinates.
+        let scaled_contour: Vec<[u32; 2]> = contour
+            .points
+            .iter()
+            .map(|pt| {
+                [
+                    (pt.x as f32 * scale_x).round() as u32,
+                    (pt.y as f32 * scale_y).round() as u32,
+                ]
+            })
+            .collect();
+
         // Scale back to original image coordinates
         let x1 = (min_x as f32 * scale_x).round() as u32;
         let y1 = (min_y as f32 * scale_y).round() as u32;
@@ -420,7 +612,10 @@ fn postprocess(
         let x2 = (x2 + pad_x).min(orig_w);
         let y2 = (y2 + pad_y).min(orig_h);
 
-        boxes.push(TextBoundingBox { x1, y1, x2, y2 });
+        boxes.push(TextBoundingBox {
+            x1, y1, x2, y2, confidence,
+            contours: vec![scaled_contour],
+        });
     }
 
     merge_overlapping(boxes)
@@ -436,11 +631,15 @@ fn overlaps(a: &TextBoundingBox, b: &TextBoundingBox) -> bool {
 
 #[cfg(feature = "onnx")]
 fn union_of(a: &TextBoundingBox, b: &TextBoundingBox) -> TextBoundingBox {
+    let mut contours = a.contours.clone();
+    contours.extend(b.contours.iter().cloned());
     TextBoundingBox {
         x1: a.x1.min(b.x1),
         y1: a.y1.min(b.y1),
         x2: a.x2.max(b.x2),
         y2: a.y2.max(b.y2),
+        confidence: a.confidence.max(b.confidence),
+        contours,
     }
 }
 
@@ -487,7 +686,24 @@ mod tests {
     use super::*;
 
     fn bbox(x1: u32, y1: u32, x2: u32, y2: u32) -> TextBoundingBox {
-        TextBoundingBox { x1, y1, x2, y2 }
+        TextBoundingBox { x1, y1, x2, y2, confidence: 0.0, contours: vec![] }
+    }
+
+    #[cfg(feature = "onnx")]
+    fn fmt_boxes(boxes: &[TextBoundingBox]) -> String {
+        boxes
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let pts: usize = b.contours.iter().map(|c| c.len()).sum();
+                format!(
+                    "  [{i}] ({},{})–({},{}) {}×{} confidence={:.4} contours={} pts={}",
+                    b.x1, b.y1, b.x2, b.y2, b.width(), b.height(),
+                    b.confidence, b.contours.len(), pts
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     // ── Pure-logic tests (no `onnx` feature needed) ────────────────────────
@@ -573,8 +789,9 @@ mod tests {
         assert_eq!(
             boxes.len(),
             3,
-            "expected 3 text regions, got {}: {boxes:?}",
-            boxes.len()
+            "expected 3 text regions, got {}:\n{}",
+            boxes.len(),
+            fmt_boxes(&boxes)
         );
     }
 
@@ -595,8 +812,9 @@ mod tests {
         assert_eq!(
             boxes.len(),
             2,
-            "expected 2 text regions, got {}: {boxes:?}",
-            boxes.len()
+            "expected 2 text regions, got {}:\n{}",
+            boxes.len(),
+            fmt_boxes(&boxes)
         );
     }
 }

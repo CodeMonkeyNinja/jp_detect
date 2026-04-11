@@ -18,18 +18,24 @@ jp_detect = { git = "https://github.com/codemonkeyninja/jp_detect", features = [
 ```
 
 ```rust
-use jp_detect::build_text_detector;
+use image::GenericImageView;
+use jp_detect::{build_text_detector, detection_params_for_size};
 
-// None → use the bundled model
-let detector = build_text_detector(None, 0.2, 16, 32, 32)?.unwrap();
 let image = image::open("screenshot.png")?;
+let (w, h) = image.dimensions();
+let p = detection_params_for_size(w, h);
+let detector = build_text_detector(None, p.threshold, p.dilation, p.pad_x, p.pad_y)?
+    .unwrap();
 for b in detector.detect(&image) {
-    println!("({},{})–({},{})", b.x1, b.y1, b.x2, b.y2);
+    println!("[{:.0}%] ({},{})–({},{})", b.confidence * 100.0,
+             b.x1, b.y1, b.x2, b.y2);
 }
 ```
 
-Pass a file path as the first argument to use a custom model instead of the
-bundled one.
+`detection_params_for_size` selects threshold, dilation, and padding from a
+built-in scale table based on the image's longest edge (see **Scale table**
+below).  Pass a file path as the first argument to `build_text_detector` to use
+a custom model instead of the bundled one.
 
 ## Examples
 
@@ -58,8 +64,8 @@ JSON format:
 
 ```json
 [
-  {"index": 0, "x1": 122, "y1": 42, "x2": 670, "y2": 1494, "width": 548, "height": 1452},
-  {"index": 1, "x1": 734, "y1": 213, "x2": 2668, "y2": 440, "width": 1934, "height": 227}
+  {"index": 0, "x1": 122, "y1": 42, "x2": 670, "y2": 1494, "width": 548, "height": 1452, "confidence": 0.9920, "contours": 1, "contour_points": 142},
+  {"index": 1, "x1": 734, "y1": 213, "x2": 2668, "y2": 440, "width": 1934, "height": 227, "confidence": 0.9959, "contours": 1, "contour_points": 56}
 ]
 ```
 
@@ -75,9 +81,12 @@ DynamicImage
   ↓ probability map [1, 1, 640, 640]
   ↓ threshold → binary mask
   ↓ morphological dilation (Norm::L1)
-  ↓ find_contours → AABB per contour
-  ↓ scale back to original coordinates + pad
+  ↓ find_contours → AABB + polygon per contour
+  ↓ per-contour confidence = mean(prob | prob ≥ threshold)
+  ↓ scale contour + bbox back to original coordinates + pad
   ▼ union-merge overlapping boxes → Vec<TextBoundingBox>
+
+  ⤷ detect_with_map() also returns the raw 640×640 probability map
 ```
 
 ## Feature flags
@@ -86,6 +95,25 @@ DynamicImage
 |--------|-------------|
 | `onnx` | Enables `DbNetDetector` and embeds the ONNX model (~4.7 MB). Without this flag the public types are still compiled but `build_text_detector` always returns `Ok(None)`. |
 
+## Scale table
+
+`detection_params_for_size(w, h)` returns the appropriate parameters from the
+built-in scale table based on the image's longest edge.  DBNet always runs at
+640 × 640 internally, so dilation of *N* pixels at that resolution represents
+*N* × (original / 640) pixels in the original — much more morphological blur
+for large inputs.
+
+| Longest edge | Dilation | Threshold | Pad |
+|--------------|----------|-----------|-----|
+| ≤ 800        | 16       | 0.20      | 32  |
+| ≤ 1 280      | 10       | 0.25      | 24  |
+| ≤ 1 920      |  6       | 0.35      | 16  |
+| ≤ 2 560      |  3       | 0.45      | 12  |
+| > 2 560      |  0       | 0.50      |  8  |
+
+You can also pass parameters directly to `build_text_detector` if you need
+custom values.
+
 ## Parameter guidance
 
 | Parameter  | Default | Notes |
@@ -93,6 +121,31 @@ DynamicImage
 | `threshold`| `0.2`   | Lower than the paper's 0.3 default; the StabRise model produces sparser probability maps on Japanese text. |
 | `dilation` | `16`    | At 640 × 640 scale ≈ 4 % of image width; merges per-character blobs into word/line regions. |
 | `pad_x/y`  | `32`    | Applied at original-image scale; provides ascender/descender headroom. |
+| `confidence` | — | Per-box mean probability (0.0–1.0) of thresholded pixels from the DBNet probability map. Higher = stronger model belief that the region contains text. |
+| `contours` | — | Polygon vertices (`Vec<Vec<[u32; 2]>>`) in original-image coordinates. Useful for oriented bounding boxes, text-angle estimation, or tighter masking. |
+
+### `detect_with_map`
+
+`DbNetDetector::detect_with_map` returns a `DetectionOutput` containing the
+bounding boxes **and** the raw 640 × 640 probability map.  Use this when you
+need custom thresholding, heatmap visualisation, or any post-processing beyond
+what the built-in pipeline provides.
+
+## Available but unexposed data
+
+The DBNet pipeline produces additional data that is not currently returned but
+is documented in-code (`src/lib.rs`, `postprocess`) for future consideration.
+Each item is marked with a `NOTE (unsupported data — ...)` comment.
+
+| Data | Where available | Potential use |
+|------|-----------------|---------------|
+| Pre-dilation contours | Before `dilate()` call | Individual character/cluster blobs; rough character count; line segmentation |
+| Max probability per region | `prob_map` max within contour bbox | Ranking detections by strongest pixel instead of mean |
+| Fill ratio | `prob_count / bbox_area` at 640×640 scale | Distinguishing dense paragraphs from sparse labels |
+| Thresholded pixel count | `prob_count` in confidence loop | Text-ink area proxy; rough measure of text quantity |
+| Contour border type | `contour.border_type` (Outer/Hole) | Filtering false positives from interior boundaries |
+| Contour parent hierarchy | `contour.parent` (index into contour vec) | Nested region detection (text inside bordered panels) |
+| Discarded contour count | Contours with < 4 pts or < 5×5 bbox | Diagnostic signal for noisy input or aggressive threshold |
 
 ## Credits & Citations
 

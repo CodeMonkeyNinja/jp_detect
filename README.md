@@ -69,6 +69,8 @@ JSON format:
 ]
 ```
 
+See [unified OCR benchmark](https://github.com/HidekiAI/lenzu/blob/trunk/docs/scores.md) for detection + OCR accuracy results across all engines.
+
 ## Pipeline
 
 ```

@@ -44,19 +44,18 @@ Example terminal output:
 
 ```
 image : /dev/shm/jp_detect/Unit-test-sample-texts_annotated.png
-json  : /dev/shm/jp_detect/Unit-test-sample-texts_boxes.json (4 boxes)
+json  : /dev/shm/jp_detect/Unit-test-sample-texts_boxes.json (2 boxes)
 
 image : /dev/shm/jp_detect/OCR-Demo-JP2EN_annotated.png
-json  : /dev/shm/jp_detect/OCR-Demo-JP2EN_boxes.json (5 boxes)
+json  : /dev/shm/jp_detect/OCR-Demo-JP2EN_boxes.json (3 boxes)
 ```
 
 ### JSON format
 
 ```json
 [
-  {"index": 0, "x1": 122, "y1": 42,  "x2": 670,  "y2": 1494, "width": 548,  "height": 1452, "confidence": 0.9920, "contours": 1, "contour_points": 142},
-  {"index": 1, "x1": 734, "y1": 213, "x2": 2668, "y2": 440,  "width": 1934, "height": 227,  "confidence": 0.9959, "contours": 1, "contour_points": 56},
-  {"index": 2, "x1": 742, "y1": 599, "x2": 2650, "y2": 915,  "width": 1908, "height": 316,  "confidence": 0.9970, "contours": 1, "contour_points": 78}
+  {"index": 0, "x1": 3, "y1": 0, "x2": 178, "y2": 349, "width": 175, "height": 349, "confidence": 0.9745, "contours": 1, "contour_points": 1235},
+  {"index": 1, "x1": 142, "y1": 23, "x2": 630, "y2": 233, "width": 488, "height": 210, "confidence": 0.9923, "contours": 2, "contour_points": 1844}
 ]
 ```
 
@@ -75,11 +74,11 @@ Each entry contains:
 
 ### Sample output
 
-**Unit-test-sample-texts.png** — 4 text regions detected:
+**Unit-test-sample-texts.png** — 2 text regions detected (tategaki separate, yokogaki+tegaki merged):
 
 ![Unit-test-sample-texts annotated](output/Unit-test-sample-texts_annotated.png)
 
-**OCR-Demo-JP2EN.png** — 5 text regions detected:
+**OCR-Demo-JP2EN.png** — 3 text regions detected (multi-line dialogue merged):
 
 ![OCR-Demo-JP2EN annotated](output/OCR-Demo-JP2EN_annotated.png)
 

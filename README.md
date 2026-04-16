@@ -64,8 +64,8 @@ JSON format:
 
 ```json
 [
-  {"index": 0, "x1": 122, "y1": 42, "x2": 670, "y2": 1494, "width": 548, "height": 1452, "confidence": 0.9920, "contours": 1, "contour_points": 142},
-  {"index": 1, "x1": 734, "y1": 213, "x2": 2668, "y2": 440, "width": 1934, "height": 227, "confidence": 0.9959, "contours": 1, "contour_points": 56}
+  {"index": 0, "x1": 3, "y1": 0, "x2": 178, "y2": 349, "width": 175, "height": 349, "confidence": 0.9745, "contours": 1, "contour_points": 1235},
+  {"index": 1, "x1": 142, "y1": 23, "x2": 630, "y2": 233, "width": 488, "height": 210, "confidence": 0.9923, "contours": 2, "contour_points": 1844}
 ]
 ```
 
@@ -103,15 +103,17 @@ DynamicImage
 built-in scale table based on the image's longest edge.  DBNet always runs at
 640 × 640 internally, so dilation of *N* pixels at that resolution represents
 *N* × (original / 640) pixels in the original — much more morphological blur
-for large inputs.
+for large inputs.  Padding increases for larger images because inter-line gaps
+(in original coordinates) grow with resolution.  Orientation-aware merging
+prevents vertical/horizontal cross-merging regardless of pad size.
 
 | Longest edge | Dilation | Threshold | Pad |
 |--------------|----------|-----------|-----|
 | ≤ 800        | 16       | 0.20      | 32  |
-| ≤ 1 280      | 10       | 0.25      | 24  |
-| ≤ 1 920      |  6       | 0.35      | 16  |
-| ≤ 2 560      |  3       | 0.45      | 12  |
-| > 2 560      |  0       | 0.50      |  8  |
+| ≤ 1 280      | 10       | 0.25      | 32  |
+| ≤ 1 920      |  6       | 0.35      | 32  |
+| ≤ 2 560      |  3       | 0.45      | 40  |
+| > 2 560      |  0       | 0.50      | 48  |
 
 You can also pass parameters directly to `build_text_detector` if you need
 custom values.

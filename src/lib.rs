@@ -188,16 +188,23 @@ pub struct DetectionScaleEntry {
 /// | Longest edge | Dilation | Threshold | Pad |
 /// |--------------|----------|-----------|-----|
 /// | ≤ 800        | 16       | 0.20      | 32  |
-/// | ≤ 1 280      | 10       | 0.25      | 24  |
-/// | ≤ 1 920      |  6       | 0.35      | 16  |
-/// | ≤ 2 560      |  3       | 0.45      | 12  |
-/// | > 2 560      |  0       | 0.50      |  8  |
+/// | ≤ 1 280      | 10       | 0.25      | 32  |
+/// | ≤ 1 920      |  6       | 0.35      | 32  |
+/// | ≤ 2 560      |  3       | 0.45      | 40  |
+/// | > 2 560      |  0       | 0.50      | 48  |
+///
+/// Dilation scales inversely with image size (it operates at 640×640 scale, so
+/// *N* dilation pixels represent *N* × (original / 640) in the original image).
+/// Padding increases for larger images because inter-line gaps (in original
+/// coordinates) grow with resolution — pad must be large enough to bridge
+/// adjacent text lines within a block.  Orientation-aware merging prevents
+/// vertical/horizontal cross-merging regardless of pad size.
 pub const DEFAULT_SCALE_TABLE: &[DetectionScaleEntry] = &[
     DetectionScaleEntry { max_dimension:       800, dilation: 16, threshold: 0.20, pad_x: 32, pad_y: 32 },
-    DetectionScaleEntry { max_dimension:      1280, dilation: 10, threshold: 0.25, pad_x: 24, pad_y: 24 },
-    DetectionScaleEntry { max_dimension:      1920, dilation:  6, threshold: 0.35, pad_x: 16, pad_y: 16 },
-    DetectionScaleEntry { max_dimension:      2560, dilation:  3, threshold: 0.45, pad_x: 12, pad_y: 12 },
-    DetectionScaleEntry { max_dimension: u32::MAX,  dilation:  0, threshold: 0.50, pad_x:  8, pad_y:  8 },
+    DetectionScaleEntry { max_dimension:      1280, dilation: 10, threshold: 0.25, pad_x: 32, pad_y: 32 },
+    DetectionScaleEntry { max_dimension:      1920, dilation:  6, threshold: 0.35, pad_x: 32, pad_y: 32 },
+    DetectionScaleEntry { max_dimension:      2560, dilation:  3, threshold: 0.45, pad_x: 40, pad_y: 40 },
+    DetectionScaleEntry { max_dimension: u32::MAX,  dilation:  0, threshold: 0.50, pad_x: 48, pad_y: 48 },
 ];
 
 /// Look up detection parameters for an image of the given pixel dimensions.
@@ -621,8 +628,21 @@ fn postprocess(
     merge_overlapping(boxes)
 }
 
+/// A box is vertical (tategaki) when its height exceeds its width.
+#[cfg(feature = "onnx")]
+fn is_vertical(b: &TextBoundingBox) -> bool {
+    b.height() > b.width()
+}
+
 #[cfg(feature = "onnx")]
 fn overlaps(a: &TextBoundingBox, b: &TextBoundingBox) -> bool {
+    // Never merge vertical (tategaki) with horizontal (yokogaki) boxes.
+    // Mixing reading directions produces unreadable mashed text, and kanji
+    // that span a line break (e.g. 日本) change meaning when split across
+    // incompatible boxes.
+    if is_vertical(a) != is_vertical(b) {
+        return false;
+    }
     a.x1 < b.x2 + MERGE_GAP
         && a.x2 + MERGE_GAP > b.x1
         && a.y1 < b.y2 + MERGE_GAP
@@ -772,13 +792,16 @@ mod tests {
         assert_eq!((u.x1, u.y1, u.x2, u.y2), (0, 0, 20, 20));
     }
 
-    /// Lens-crop simulation: three separate text regions in Unit-test-sample-texts.png.
+    /// Lens-crop simulation: three text regions in Unit-test-sample-texts.png.
     ///
-    /// Expected output validated against the dbnet-test prototype with
-    /// threshold=0.2, dilation=16, pad=32×32.
+    /// With orientation-aware merging, the tategaki (vertical) region stays
+    /// separate while the two horizontal regions (yokogaki + tegaki) merge
+    /// because their padded boxes overlap and share the same orientation.
+    /// 2 boxes is the acceptable minimum — tategaki must never merge with
+    /// yokogaki, as mixing reading directions produces garbage OCR.
     #[cfg(feature = "onnx")]
     #[test]
-    fn test_detect_lens_crop_returns_three_boxes() {
+    fn test_detect_lens_crop_separates_tategaki() {
         let root = env!("CARGO_MANIFEST_DIR");
         let image_path = format!("{root}/tests/fixtures/Unit-test-sample-texts.png");
         let detector = DbNetDetector::from_bytes(EMBEDDED_MODEL, 0.2, 16, 32, 32)
@@ -788,18 +811,31 @@ mod tests {
         let boxes = detector.detect(&image);
         assert_eq!(
             boxes.len(),
-            3,
-            "expected 3 text regions, got {}:\n{}",
+            2,
+            "expected 2 regions (tategaki + merged yokogaki/tegaki), got {}:\n{}",
             boxes.len(),
             fmt_boxes(&boxes)
+        );
+        // Box [0] must be the tategaki column (taller than wide).
+        assert!(
+            boxes[0].height() > boxes[0].width(),
+            "box [0] should be vertical (tategaki): {}×{}",
+            boxes[0].width(), boxes[0].height(),
+        );
+        // Box [1] must be the merged horizontal text (wider than tall).
+        assert!(
+            boxes[1].width() > boxes[1].height(),
+            "box [1] should be horizontal (yokogaki+tegaki): {}×{}",
+            boxes[1].width(), boxes[1].height(),
         );
     }
 
     /// Fullscreen capture simulation: two dialogue regions in OCR-Demo-JP2EN.png.
     ///
-    /// Expected output validated against the dbnet-test prototype with
-    /// threshold=0.2, dilation=16, pad=32×32: header + dialogue merge into one
-    /// box, subtitle is the second.
+    /// With orientation-aware merging, horizontal regions that overlap after
+    /// padding merge together: header + book title form one box, "Text Window"
+    /// label + multi-line dialogue form the other.  This keeps multi-line text
+    /// intact (preventing kanji splits like 日→本 across boxes).
     #[cfg(feature = "onnx")]
     #[test]
     fn test_detect_fullscreen_returns_two_boxes() {

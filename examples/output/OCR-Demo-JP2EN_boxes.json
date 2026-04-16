@@ -1,4 +1,5 @@
 [
-  {"index": 0, "x1": 509, "y1": 0, "x2": 1836, "y2": 608, "width": 1327, "height": 608},
-  {"index": 1, "x1": 104, "y1": 993, "x2": 2672, "y2": 1405, "width": 2568, "height": 412}
+  {"index": 0, "x1": 564, "y1": 10, "x2": 1082, "y2": 149, "width": 518, "height": 139, "confidence": 0.9930, "contours": 1, "contour_points": 216},
+  {"index": 1, "x1": 1056, "y1": 194, "x2": 1782, "y2": 583, "width": 726, "height": 389, "confidence": 0.9920, "contours": 2, "contour_points": 542},
+  {"index": 2, "x1": 159, "y1": 1015, "x2": 2618, "y2": 1382, "width": 2459, "height": 367, "confidence": 0.9963, "contours": 3, "contour_points": 1977}
 ]

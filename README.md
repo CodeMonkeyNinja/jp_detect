@@ -14,7 +14,7 @@ vertical Japanese columns.
 
 ```toml
 [dependencies]
-jp_detect = { git = "https://github.com/codemonkeyninja/jp_detect", features = ["onnx"] }
+jp_detect = { version = "1", features = ["onnx"] }
 ```
 
 ```rust
